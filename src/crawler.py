@@ -17,6 +17,16 @@ pdf_mapping_lock = asyncio.Lock()
 
 _seen_urls = set()
 
+async def append_to_error_log(root: str, url: str, error_msg: str):
+    """Logs failed URLs and errors to maintain an audit trail."""
+    async with cache_lock:
+        cache_dir = os.path.join(root, "cache")
+        os.makedirs(cache_dir, exist_ok=True)
+        error_log = os.path.join(cache_dir, "error_log.txt")
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(error_log, "a", encoding="utf-8") as f:
+            f.write(f"{now}\t{url}\t{error_msg}\n")
+
 async def append_to_cache_log(root: str, url: str, local_path: str, file_size: int, status_code: int = 200, mime_type: str = "text/html"):
     """Logs downloaded URLs to prevent redundant fetching and maintain history."""
     global _seen_urls
@@ -162,7 +172,6 @@ async def crawl_site(entry_url: str, root: str, concurrency: int = 5):
 
                 async with pages_crawled_lock:
                     pages_crawled_count += 1
-                    current_idx = pages_crawled_count
                 
                 print(f"[Worker {worker_id}] Crawling ({pages_crawled_count}): {normalized_url}")
                 print("[*] Queue size:", queue.qsize())
@@ -214,6 +223,7 @@ async def crawl_site(entry_url: str, root: str, concurrency: int = 5):
 
                             except Exception as dl_err:
                                 print(f"[Worker {worker_id}] [!] Failed to download binary {normalized_url}: {dl_err}")
+                                await append_to_error_log(root, normalized_url, f"Binary download failed: {dl_err}")
                                 # Discard deferred mappings — file was never saved
                                 async with visited_lock:
                                     pending_asset_mapping.pop(normalized_url, None)
@@ -225,17 +235,21 @@ async def crawl_site(entry_url: str, root: str, concurrency: int = 5):
 
                     if not is_cached:
                         response = None
-                        status_code = 200
+                        status_code = 0
                         for goto_attempt in range(3):
                             try:
                                 response = await page.goto(normalized_url, wait_until="networkidle", timeout=30000)
-                                status_code = response.status if response else 200
+                                status_code = response.status if response else 0
                                 break
                             except Exception as goto_err:
                                 print(f"[Worker {worker_id}] Timeout/Error on attempt {goto_attempt+1} for {normalized_url}: {goto_err}")
                                 if goto_attempt == 2:
-                                    raise goto_err
+                                    await append_to_error_log(root, normalized_url, f"Goto failed: {goto_err}")
+                                    break
                                 await asyncio.sleep(2)
+
+                        if response is None:
+                            continue
 
                         try:
                             await page.wait_for_load_state("networkidle", timeout=10000)
@@ -243,8 +257,9 @@ async def crawl_site(entry_url: str, root: str, concurrency: int = 5):
                         except Exception:
                             pass
 
-                        if response and response.status >= 400:
+                        if response.status >= 400:
                             print(f"[Worker {worker_id}] [!] Failed status {response.status} for {normalized_url}")
+                            await append_to_error_log(root, normalized_url, f"HTTP {response.status}")
                             continue
 
                         try:
@@ -397,12 +412,10 @@ async def crawl_site(entry_url: str, root: str, concurrency: int = 5):
                             if not href or href.startswith("javascript:") or href.startswith("mailto:") or href.startswith("#"):
                                 continue
 
-                            anchor_text = element.get_text(strip=True) or ""
-
                             absolute_target = urllib.parse.urljoin(normalized_url, href)
                             parsed_target = urllib.parse.urlparse(absolute_target)
 
-                            base_domain = allowed_domains.replace("www.", "")
+                            base_domain = allowed_domains[4:] if allowed_domains.startswith("www.") else allowed_domains
                             if parsed_target.netloc.lower() in  [base_domain, f"www.{base_domain}"]:
                                 t_netloc = parsed_target.netloc.lower()
                                 if t_netloc.startswith("www."): 
@@ -420,7 +433,6 @@ async def crawl_site(entry_url: str, root: str, concurrency: int = 5):
                                 # Convert literal space characters to standard URL-encoded %20 to prevent download crashes
                                 target_normalized = target_normalized.replace(" ", "%20")
 
-                                netloc_absolute = parsed_target.netloc.lower()
                                 is_binary_link = any(target_normalized.lower().split('?')[0].endswith(ext) for ext in [
                                 '.pdf', '.zip', '.tar', '.gz', '.tgz', '.exe', '.msi', '.dmg',
                                 '.xls', '.xlsx', '.doc', '.docx', '.ppt', '.pptx',
@@ -449,10 +461,10 @@ async def crawl_site(entry_url: str, root: str, concurrency: int = 5):
                                     if target_normalized not in visited:
                                         visited.add(target_normalized)
                                         await queue.put(target_normalized)
-                                        discovered_links += 1
 
                 except Exception as e:
                     print(f"[Worker {worker_id}] [!] Error on '{normalized_url}': {e}")
+                    await append_to_error_log(root, normalized_url, str(e))
                     print(f"[Worker {worker_id}] Re-initializing worker page state to recover from error...")
                     try:
                         await page.close()
