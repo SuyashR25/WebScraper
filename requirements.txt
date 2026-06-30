@@ -1,0 +1,14 @@
+beautifulsoup4
+playwright
+
+# Python Standard Library Modules (pre-installed with Python):
+# asyncio
+# datetime
+# http
+# mimetypes
+# os
+# re
+# ssl
+# sys
+# time
+# urllib

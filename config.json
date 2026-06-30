@@ -1,0 +1,5 @@
+{
+    "target_url": "https://docs.python.org/3/",
+    "output_dir": "./mirror_output",
+    "concurrency": 2
+}
