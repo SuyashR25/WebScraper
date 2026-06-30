@@ -42,7 +42,7 @@ def download_binaries(url: str, dest_path: str, retries: int = 3):
                         chunk = response.read(65536)
                         if not chunk:
                             break
-                    f.write(chunk)
+                        f.write(chunk)
 
             if os.path.exists(temp_path):
                 if os.path.exists(dest_path):
